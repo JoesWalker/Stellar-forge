@@ -8,7 +8,8 @@ import { ipfsService } from '../services/ipfs'
 import { stellarExplorerUrl, ipfsToGatewayUrl, formatAddress } from '../utils/formatting'
 import { isValidContractAddress } from '../utils/validation'
 import type { TokenInfo, IPFSMetadata } from '../types'
-import { Card, Button, Spinner } from './UI'
+import { Card, Button } from './UI'
+import { TokenDetailSkeleton } from './UI/Skeleton'
 import { CopyButton } from './CopyButton'
 import { QRCodeModal } from './UI/QRCodeModal'
 import { ShareButton } from './ShareButton'
@@ -127,11 +128,7 @@ export const TokenDetail: React.FC = () => {
   )
 
   if (loading) {
-    return (
-      <div className="flex justify-center items-center py-20" aria-live="polite">
-        <Spinner size="lg" label={t('tokenDetail.loading', { address: formatAddress(address || '') })} />
-      </div>
-    )
+    return <TokenDetailSkeleton />
   }
 
   if (notFound || !token) {
