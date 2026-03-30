@@ -1,4 +1,14 @@
 // Stellar SDK integration service
+import { STELLAR_CONFIG, NETWORK_CONFIGS } from '../config/stellar'
+import { walletService } from './wallet'
+import type {
+  ContractEvent,
+  ContractEventType,
+  DeploymentResult,
+  FactoryState,
+  GetEventsResult,
+  TokenInfo,
+} from '../types'
 import {
   Contract,
   TransactionBuilder,
@@ -12,16 +22,9 @@ import {
   FeeBumpTransaction,
   Transaction,
 } from 'stellar-sdk'
-import { STELLAR_CONFIG } from '../config/stellar'
-import { walletService } from './wallet'
-import type {
-  ContractEvent,
-  ContractEventType,
-  DeploymentResult,
-  FactoryState,
-  GetEventsResult,
-  TokenInfo,
-} from '../types'
+import { withRetry, HttpError } from '../utils/retry'
+
+export type { FactoryState } from '../types'
 
 // ── Utilities ─────────────────────────────────────────────────────────────────
 
@@ -34,56 +37,26 @@ function hexToBytes(hex: string): Uint8Array {
 }
 
 // ── Contract error codes ──────────────────────────────────────────────────────
-
-const CONTRACT_ERRORS: Record<number, string> = {
-  1: 'Insufficient fee payment. Please increase the fee amount.',
-  2: 'Unauthorized. You do not have permission to perform this action.',
-  3: 'Invalid parameters provided.',
-  4: 'Token not found.',
-  5: 'Metadata has already been set for this token.',
-  6: 'Contract is already initialized.',
-  7: 'Burn amount exceeds your token balance.',
-  8: 'Burning is not enabled for this token.',
-  9: 'Invalid burn amount. Must be greater than zero.',
-  10: 'Contract is paused. Please try again later.',
-}
-
-function parseContractError(err: unknown): Error {
-  const msg = err instanceof Error ? err.message : String(err)
-
-  // Soroban contract errors surface as "Error(Contract, X)" in the result XDR
-  const match = msg.match(/Error\(Contract,\s*(\d+)\)/)
-  if (match) {
-    const code = parseInt(match[1], 10)
-    return new Error(CONTRACT_ERRORS[code] ?? `Contract error code ${code}`)
-  }
-
-  // Simulation failure messages
-  if (msg.includes('simulation')) return new Error(`Simulation failed: ${msg}`)
-
-  return err instanceof Error ? err : new Error(msg)
-}
+import { parseContractError } from '../utils/contractErrors'
 
 // ── Network helpers ───────────────────────────────────────────────────────────
 
-function getNetworkConfig() {
-  const network = STELLAR_CONFIG.network as 'testnet' | 'mainnet'
-  return STELLAR_CONFIG[network]
+function getNetworkConfig(network: 'testnet' | 'mainnet') {
+  return NETWORK_CONFIGS[network]
 }
 
-function getNetworkPassphrase(): string {
-  const network = STELLAR_CONFIG.network as 'testnet' | 'mainnet'
+function getNetworkPassphrase(network: 'testnet' | 'mainnet'): string {
   return network === 'mainnet' ? Networks.PUBLIC : Networks.TESTNET
 }
 
-function getRpcServer(): rpc.Server {
-  return new rpc.Server(getNetworkConfig().sorobanRpcUrl, {
+function getRpcServer(network: 'testnet' | 'mainnet'): rpc.Server {
+  return new rpc.Server(getNetworkConfig(network).sorobanRpcUrl, {
     allowHttp: false,
   })
 }
 
-function getRpcUrl(): string {
-  return getNetworkConfig().sorobanRpcUrl
+function getRpcUrl(network: 'testnet' | 'mainnet'): string {
+  return getNetworkConfig(network).sorobanRpcUrl
 }
 
 // ── Transaction lifecycle ─────────────────────────────────────────────────────
@@ -95,6 +68,7 @@ function getRpcUrl(): string {
 async function simulateAndSubmit(
   server: rpc.Server,
   tx: ReturnType<TransactionBuilder['build']>,
+  network: 'testnet' | 'mainnet',
 ): Promise<string> {
   // 1. Simulate to get resource fees and check for errors
   const simResult = await server.simulateTransaction(tx)
@@ -111,15 +85,17 @@ async function simulateAndSubmit(
   const assembled = rpc.assembleTransaction(tx, simResult).build()
 
   // 3. Sign via Freighter
-  const signedXdr = await walletService.signTransaction(assembled.toXDR())
+  const signedXdr = await walletService.signTransaction(assembled.toXDR(), network)
 
   // 4. Submit
   const submitResult = await server.sendTransaction(
-    TransactionBuilder.fromXDR(signedXdr, getNetworkPassphrase()),
+    TransactionBuilder.fromXDR(signedXdr, getNetworkPassphrase(network)),
   )
 
   if (submitResult.status === 'ERROR') {
-    throw parseContractError(new Error(submitResult.errorResult?.toXDR('base64') ?? 'Submission failed'))
+    throw parseContractError(
+      new Error(submitResult.errorResult?.toXDR('base64') ?? 'Submission failed'),
+    )
   }
 
   const hash = submitResult.hash
@@ -137,7 +113,9 @@ async function pollTransaction(
   intervalMs = 2000,
 ): Promise<rpc.Api.GetTransactionResponse> {
   for (let i = 0; i < maxAttempts; i++) {
-    const result = await server.getTransaction(hash)
+    const result = (await withRetry(() =>
+      server.getTransaction(hash),
+    )) as rpc.Api.GetTransactionResponse
     if (result.status === rpc.Api.GetTransactionStatus.SUCCESS) {
       return result
     }
@@ -154,29 +132,14 @@ async function pollTransaction(
 
 /**
  * Wraps an inner (signed) transaction in a fee bump transaction.
- *
- * Use this when the inner transaction's source account has insufficient XLM to
- * cover the base fee. The `feeSource` account pays the network fee instead,
- * allowing the inner transaction to succeed even with a near-empty balance.
- *
- * Flow:
- *  1. Build and sign the inner transaction normally (e.g. via simulateAndSubmit).
- *  2. Pass the signed inner XDR and a fee-source address to this function.
- *  3. The fee-source account signs the resulting fee bump envelope.
- *  4. Submit the fee bump transaction to the network.
- *
- * @param innerTxXdr  - Base64 XDR of the signed inner transaction.
- * @param feeSource   - Stellar address that will pay the base fee.
- * @param baseFee     - Fee per operation in stroops (defaults to 10× BASE_FEE
- *                      to ensure the bump is accepted by the network).
- * @returns The signed fee bump transaction XDR ready for submission.
  */
 export async function buildFeeBumpTransaction(
   innerTxXdr: string,
   feeSource: string,
+  network: 'testnet' | 'mainnet',
   baseFee: string = String(Number(BASE_FEE) * 10),
 ): Promise<string> {
-  const networkPassphrase = getNetworkPassphrase()
+  const networkPassphrase = getNetworkPassphrase(network)
 
   // Reconstruct the inner transaction from XDR
   const innerTx = TransactionBuilder.fromXDR(innerTxXdr, networkPassphrase) as Transaction
@@ -190,20 +153,20 @@ export async function buildFeeBumpTransaction(
   )
 
   // The fee-source account must sign the fee bump envelope
-  const signedFeeBumpXdr = await walletService.signTransaction(feeBumpTx.toXDR())
+  const signedFeeBumpXdr = await walletService.signTransaction(feeBumpTx.toXDR(), network)
 
   return signedFeeBumpXdr
 }
 
 /**
  * Submit a signed fee bump transaction and wait for confirmation.
- *
- * @param signedFeeBumpXdr - Base64 XDR of the signed fee bump transaction.
- * @returns The transaction hash on success.
  */
-export async function submitFeeBumpTransaction(signedFeeBumpXdr: string): Promise<string> {
-  const server = getRpcServer()
-  const networkPassphrase = getNetworkPassphrase()
+export async function submitFeeBumpTransaction(
+  signedFeeBumpXdr: string,
+  network: 'testnet' | 'mainnet',
+): Promise<string> {
+  const server = getRpcServer(network)
+  const networkPassphrase = getNetworkPassphrase(network)
 
   const feeBumpTx = TransactionBuilder.fromXDR(
     signedFeeBumpXdr,
@@ -229,11 +192,12 @@ export async function submitFeeBumpTransaction(signedFeeBumpXdr: string): Promis
 async function buildTxBuilder(
   server: rpc.Server,
   sourceAddress: string,
+  network: 'testnet' | 'mainnet',
 ): Promise<TransactionBuilder> {
   const account = await server.getAccount(sourceAddress)
   return new TransactionBuilder(account, {
     fee: BASE_FEE,
-    networkPassphrase: getNetworkPassphrase(),
+    networkPassphrase: getNetworkPassphrase(network),
   })
 }
 
@@ -248,8 +212,8 @@ interface RpcEventResponse {
   pagingToken: string
   inSuccessfulContractCall: boolean
   txHash: string
-  topic: string[]   // base64-encoded XDR ScVal[]
-  value: string     // base64-encoded XDR ScVal
+  topic: string[] // base64-encoded XDR ScVal[]
+  value: string // base64-encoded XDR ScVal
 }
 
 interface RpcGetEventsResult {
@@ -282,8 +246,13 @@ function scValToString(val: any): string {
       if (addr.switch() === xdr.ScAddressType.scAddressTypeAccount()) {
         return addr.accountId().publicKey().toString()
       }
+      return Array.from(addr.contractId() as Uint8Array)
+        .map((b) => b.toString(16).padStart(2, '0'))
+        .join('')
       const bytes: Uint8Array = addr.contractId()
-      return Array.from(bytes).map((b) => b.toString(16).padStart(2, '0')).join('')
+      return Array.from(bytes)
+        .map((b) => b.toString(16).padStart(2, '0'))
+        .join('')
     }
     if (type === xdr.ScValType.scvI128()) {
       const hi = BigInt(v.i128().hi().toString())
@@ -319,7 +288,9 @@ async function parseRpcEvent(raw: RpcEventResponse): Promise<ContractEvent | nul
   try {
     if (!raw.topic?.length) return null
 
-    const topicVal = xdr.ScVal.fromXDR(raw.topic[0], 'base64')
+    const topic0 = raw.topic[0]
+    if (!topic0) return null
+    const topicVal = xdr.ScVal.fromXDR(topic0, 'base64')
     const eventType = scValToString(topicVal) as ContractEventType
     if (!EVENT_TOPICS.includes(eventType)) return null
 
@@ -357,9 +328,7 @@ async function parseRpcEvent(raw: RpcEventResponse): Promise<ContractEvent | nul
       id: raw.id,
       type: eventType,
       ledger: raw.ledger,
-      timestamp: raw.ledgerClosedAt
-        ? Math.floor(new Date(raw.ledgerClosedAt).getTime() / 1000)
-        : 0,
+      timestamp: raw.ledgerClosedAt ? Math.floor(new Date(raw.ledgerClosedAt).getTime() / 1000) : 0,
       txHash: raw.txHash,
       data,
     }
@@ -370,16 +339,36 @@ async function parseRpcEvent(raw: RpcEventResponse): Promise<ContractEvent | nul
 
 // ── JSON-RPC helper ───────────────────────────────────────────────────────────
 
-async function rpcCall<T>(method: string, params: unknown): Promise<T> {
-  const res = await fetch(getRpcUrl(), {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
+async function rpcCall<T>(
+  method: string,
+  params: unknown,
+  network: 'testnet' | 'mainnet',
+): Promise<T> {
+  return withRetry(async () => {
+    const res = await fetch(getRpcUrl(network), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
+    })
+    if (!res.ok) {
+      const retryAfter = res.headers.get('Retry-After')
+      throw new HttpError(
+        res.status,
+        `RPC HTTP error ${res.status}`,
+        retryAfter ? parseInt(retryAfter, 10) : undefined,
+      )
+    }
+    const json = await res.json()
+    if (json.error) {
+      // JSON-RPC level error - might be transient (e.g. rate limit error in body)
+      const errorMsg = json.error.message ?? 'RPC error'
+      if (errorMsg.toLowerCase().includes('rate limit')) {
+        throw new HttpError(429, errorMsg)
+      }
+      throw new Error(errorMsg)
+    }
+    return json.result as T
   })
-  if (!res.ok) throw new Error(`RPC HTTP error ${res.status}`)
-  const json = await res.json()
-  if (json.error) throw new Error(json.error.message ?? 'RPC error')
-  return json.result as T
 }
 
 // ── View function helper ──────────────────────────────────────────────────────
@@ -394,12 +383,13 @@ async function callView(
   method: string,
   args: xdr.ScVal[],
   sourceAddress: string,
+  network: 'testnet' | 'mainnet',
 ): Promise<xdr.ScVal> {
   const contract = new Contract(contractId)
   const account = await server.getAccount(sourceAddress)
   const tx = new TransactionBuilder(account, {
     fee: BASE_FEE,
-    networkPassphrase: getNetworkPassphrase(),
+    networkPassphrase: getNetworkPassphrase(network),
   })
     .addOperation(contract.call(method, ...args))
     .setTimeout(30)
@@ -420,24 +410,25 @@ async function callView(
 
 // ── StellarService ────────────────────────────────────────────────────────────
 
-export interface FactoryState {
-  baseFee: number   // in stroops
-  metadataFee: number // in stroops
-}
-
 export class StellarService {
-  /**
-   * Deploy a new token via the factory's create_token function.
-   * Requires a connected wallet (Freighter).
-   */
+  private network: 'testnet' | 'mainnet'
+
+  constructor(network: 'testnet' | 'mainnet' = 'testnet') {
+    this.network = network
+  }
+
+  setNetwork(network: 'testnet' | 'mainnet') {
+    this.network = network
+  }
+
   async deployToken(params: {
     name: string
     symbol: string
     decimals: number
     initialSupply: string
-    salt: string          // 32-byte hex string, unique per creator
-    tokenWasmHash: string // 32-byte hex hash of the token WASM
-    feePayment: string    // i128 as string (stroops)
+    salt: string
+    tokenWasmHash: string
+    feePayment: string
   }): Promise<DeploymentResult> {
     try {
       const contractId = STELLAR_CONFIG.factoryContractId
@@ -446,39 +437,35 @@ export class StellarService {
       const sourceAddress = walletService.getConnectedAddress()
       if (!sourceAddress) throw new Error('Wallet not connected')
 
-      const server = getRpcServer()
+      const server = getRpcServer(this.network)
       const contract = new Contract(contractId)
 
       const saltBytes = hexToBytes(params.salt.padEnd(64, '0').slice(0, 64))
       const wasmHashBytes = hexToBytes(params.tokenWasmHash.padEnd(64, '0').slice(0, 64))
 
-      const txBuilder = await buildTxBuilder(server, sourceAddress)
+      const txBuilder = await buildTxBuilder(server, sourceAddress, this.network)
       const tx = txBuilder
         .addOperation(
           contract.call(
             'create_token',
-            new Address(sourceAddress).toScVal(),           // creator
-            nativeToScVal(saltBytes, { type: 'bytes' }),    // salt: BytesN<32>
-            nativeToScVal(wasmHashBytes, { type: 'bytes' }),// token_wasm_hash: BytesN<32>
-            nativeToScVal(params.name, { type: 'string' }), // name
-            nativeToScVal(params.symbol, { type: 'string' }),// symbol
-            nativeToScVal(params.decimals, { type: 'u32' }),// decimals
-            nativeToScVal(BigInt(params.initialSupply), { type: 'i128' }), // initial_supply
-            nativeToScVal(BigInt(params.feePayment), { type: 'i128' }),    // fee_payment
+            new Address(sourceAddress).toScVal(),
+            nativeToScVal(saltBytes, { type: 'bytes' }),
+            nativeToScVal(wasmHashBytes, { type: 'bytes' }),
+            nativeToScVal(params.name, { type: 'string' }),
+            nativeToScVal(params.symbol, { type: 'string' }),
+            nativeToScVal(params.decimals, { type: 'u32' }),
+            nativeToScVal(BigInt(params.initialSupply), { type: 'u128' }),
+            nativeToScVal(BigInt(params.feePayment), { type: 'i128' }),
           ),
         )
         .setTimeout(30)
         .build()
 
-      const hash = await simulateAndSubmit(server, tx)
+      const hash = await simulateAndSubmit(server, tx, this.network)
 
-      // The return value is the new token address — fetch it from the transaction result
       const txResult = await server.getTransaction(hash)
       let tokenAddress = ''
-      if (
-        txResult.status === rpc.Api.GetTransactionStatus.SUCCESS &&
-        txResult.returnValue
-      ) {
+      if (txResult.status === rpc.Api.GetTransactionStatus.SUCCESS && txResult.returnValue) {
         tokenAddress = scValToNative(txResult.returnValue) as string
       }
 
@@ -488,14 +475,11 @@ export class StellarService {
     }
   }
 
-  /**
-   * Mint additional tokens to a recipient address.
-   */
   async mintTokens(params: {
     tokenAddress: string
     to: string
-    amount: string    // i128 as string
-    feePayment: string // i128 as string
+    amount: string
+    feePayment: string
   }): Promise<string> {
     try {
       const contractId = STELLAR_CONFIG.factoryContractId
@@ -504,37 +488,31 @@ export class StellarService {
       const sourceAddress = walletService.getConnectedAddress()
       if (!sourceAddress) throw new Error('Wallet not connected')
 
-      const server = getRpcServer()
+      const server = getRpcServer(this.network)
       const contract = new Contract(contractId)
 
-      const txBuilder = await buildTxBuilder(server, sourceAddress)
+      const txBuilder = await buildTxBuilder(server, sourceAddress, this.network)
       const tx = txBuilder
         .addOperation(
           contract.call(
             'mint_tokens',
-            new Address(params.tokenAddress).toScVal(), // token_address
-            new Address(sourceAddress).toScVal(),       // admin
-            new Address(params.to).toScVal(),           // to
-            nativeToScVal(BigInt(params.amount), { type: 'i128' }),     // amount
-            nativeToScVal(BigInt(params.feePayment), { type: 'i128' }), // fee_payment
+            new Address(params.tokenAddress).toScVal(),
+            new Address(sourceAddress).toScVal(),
+            new Address(params.to).toScVal(),
+            nativeToScVal(BigInt(params.amount), { type: 'i128' }),
+            nativeToScVal(BigInt(params.feePayment), { type: 'i128' }),
           ),
         )
         .setTimeout(30)
         .build()
 
-      return await simulateAndSubmit(server, tx)
+      return await simulateAndSubmit(server, tx, this.network)
     } catch (err) {
       throw parseContractError(err)
     }
   }
 
-  /**
-   * Burn tokens from the caller's balance.
-   */
-  async burnTokens(params: {
-    tokenAddress: string
-    amount: string // i128 as string
-  }): Promise<string> {
+  async burnTokens(params: { tokenAddress: string; amount: string }): Promise<string> {
     try {
       const contractId = STELLAR_CONFIG.factoryContractId
       if (!contractId) throw new Error('Factory contract ID is not configured')
@@ -542,35 +520,32 @@ export class StellarService {
       const sourceAddress = walletService.getConnectedAddress()
       if (!sourceAddress) throw new Error('Wallet not connected')
 
-      const server = getRpcServer()
+      const server = getRpcServer(this.network)
       const contract = new Contract(contractId)
 
-      const txBuilder = await buildTxBuilder(server, sourceAddress)
+      const txBuilder = await buildTxBuilder(server, sourceAddress, this.network)
       const tx = txBuilder
         .addOperation(
           contract.call(
             'burn',
-            new Address(params.tokenAddress).toScVal(),                // token_address
-            new Address(sourceAddress).toScVal(),                      // from
-            nativeToScVal(BigInt(params.amount), { type: 'i128' }),    // amount
+            new Address(params.tokenAddress).toScVal(),
+            new Address(sourceAddress).toScVal(),
+            nativeToScVal(BigInt(params.amount), { type: 'i128' }),
           ),
         )
         .setTimeout(30)
         .build()
 
-      return await simulateAndSubmit(server, tx)
+      return await simulateAndSubmit(server, tx, this.network)
     } catch (err) {
       throw parseContractError(err)
     }
   }
 
-  /**
-   * Set IPFS metadata URI for a token.
-   */
   async setMetadata(params: {
     tokenAddress: string
     metadataUri: string
-    feePayment: string // i128 as string
+    feePayment: string
   }): Promise<string> {
     try {
       const contractId = STELLAR_CONFIG.factoryContractId
@@ -579,37 +554,32 @@ export class StellarService {
       const sourceAddress = walletService.getConnectedAddress()
       if (!sourceAddress) throw new Error('Wallet not connected')
 
-      const server = getRpcServer()
+      const server = getRpcServer(this.network)
       const contract = new Contract(contractId)
 
-      const txBuilder = await buildTxBuilder(server, sourceAddress)
+      const txBuilder = await buildTxBuilder(server, sourceAddress, this.network)
       const tx = txBuilder
         .addOperation(
           contract.call(
             'set_metadata',
-            new Address(params.tokenAddress).toScVal(),                    // token_address
-            new Address(sourceAddress).toScVal(),                          // admin
-            nativeToScVal(params.metadataUri, { type: 'string' }),         // metadata_uri
-            nativeToScVal(BigInt(params.feePayment), { type: 'i128' }),    // fee_payment
+            new Address(params.tokenAddress).toScVal(),
+            new Address(sourceAddress).toScVal(),
+            nativeToScVal(params.metadataUri, { type: 'string' }),
+            nativeToScVal(BigInt(params.feePayment), { type: 'i128' }),
           ),
         )
         .setTimeout(30)
         .build()
 
-      return await simulateAndSubmit(server, tx)
+      return await simulateAndSubmit(server, tx, this.network)
     } catch (err) {
       throw parseContractError(err)
     }
   }
 
-  /**
-   * Fetch TokenInfo for a given factory index via the get_token_info view function.
-   * Falls back to event-derived data if no wallet is connected.
-   */
   async getTokenInfo(tokenAddressOrIndex: string | number): Promise<TokenInfo> {
     const contractId = STELLAR_CONFIG.factoryContractId
 
-    // If given a token address (not an index), fall back to event scanning
     if (typeof tokenAddressOrIndex === 'string') {
       return this._getTokenInfoByAddress(tokenAddressOrIndex)
     }
@@ -618,18 +588,18 @@ export class StellarService {
 
     const sourceAddress = walletService.getConnectedAddress()
     if (!sourceAddress) {
-      // No wallet — fall back to event scanning for the index
       return this._getTokenInfoByAddress(String(tokenAddressOrIndex))
     }
 
     try {
-      const server = getRpcServer()
+      const server = getRpcServer(this.network)
       const retval = await callView(
         server,
         contractId,
         'get_token_info',
         [nativeToScVal(tokenAddressOrIndex as number, { type: 'u32' })],
         sourceAddress,
+        this.network,
       )
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -640,15 +610,13 @@ export class StellarService {
         decimals: Number(native.decimals ?? 7),
         creator: native.creator?.toString() ?? '',
         createdAt: Number(native.created_at ?? 0),
+        totalSupply: native.total_supply?.toString(),
       }
     } catch (err) {
       throw parseContractError(err)
     }
   }
 
-  /**
-   * Fetch FactoryState via the get_state view function.
-   */
   async getFactoryState(): Promise<FactoryState> {
     const contractId = STELLAR_CONFIG.factoryContractId
     if (!contractId) throw new Error('Factory contract ID is not configured')
@@ -657,8 +625,15 @@ export class StellarService {
     if (!sourceAddress) throw new Error('Wallet not connected')
 
     try {
-      const server = getRpcServer()
-      const retval = await callView(server, contractId, 'get_state', [], sourceAddress)
+      const server = getRpcServer(this.network)
+      const retval = await callView(
+        server,
+        contractId,
+        'get_state',
+        [],
+        sourceAddress,
+        this.network,
+      )
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const native = scValToNative(retval) as any
@@ -669,26 +644,53 @@ export class StellarService {
         baseFee: native.base_fee?.toString() ?? '0',
         metadataFee: native.metadata_fee?.toString() ?? '0',
         tokenCount: Number(native.token_count ?? 0),
-      }    } catch (err) {
+      }
+    } catch (err) {
       throw parseContractError(err)
     }
   }
 
-  /**
-   * Fetch a transaction's details from Horizon by hash.
-   */
   async getTransaction(hash: string): Promise<Record<string, unknown>> {
-    try {
-      const { horizonUrl } = getNetworkConfig()
+    return withRetry(async () => {
+      const { horizonUrl } = getNetworkConfig(this.network)
       const res = await fetch(`${horizonUrl}/transactions/${hash}`)
       if (!res.ok) {
         if (res.status === 404) throw new Error(`Transaction not found: ${hash}`)
-        throw new Error(`Horizon error ${res.status}`)
+        const retryAfter = res.headers.get('Retry-After')
+        throw new HttpError(
+          res.status,
+          `Horizon error ${res.status}`,
+          retryAfter ? parseInt(retryAfter, 10) : undefined,
+        )
       }
       return res.json()
-    } catch (err) {
-      throw err instanceof Error ? err : new Error(String(err))
-    }
+    })
+  }
+
+  /**
+   * Check whether a Stellar account exists on Horizon.
+   * Returns false for unfunded accounts and throws on transport failures.
+   */
+  async accountExists(address: string): Promise<boolean> {
+    return withRetry(async () => {
+      const { horizonUrl } = getNetworkConfig(this.network)
+      const res = await fetch(`${horizonUrl}/accounts/${address}`)
+
+      if (res.status === 404) {
+        return false
+      }
+
+      if (!res.ok) {
+        const retryAfter = res.headers.get('Retry-After')
+        throw new HttpError(
+          res.status,
+          `Horizon error ${res.status}`,
+          retryAfter ? parseInt(retryAfter, 10) : undefined,
+        )
+      }
+
+      return true
+    })
   }
 
   // ── Private helpers ─────────────────────────────────────────────────────────
@@ -706,7 +708,6 @@ export class StellarService {
         totalSupply: '0',
         creator: '',
         createdAt: 0,
-        metadataUri: undefined,
       }
     }
 
@@ -733,13 +734,10 @@ export class StellarService {
       totalSupply: supply.toString(),
       creator: creationEvent?.data.creator ?? '',
       createdAt: creationEvent?.timestamp ?? 0,
-      metadataUri: metadataEvent?.data.metadataUri,
+      ...(metadataEvent?.data.metadataUri ? { metadataUri: metadataEvent.data.metadataUri } : {}),
     }
   }
 
-  /**
-   * Fetch all tokens created by a specific creator address.
-   */
   async getTokensByCreator(creator: string): Promise<TokenInfo[]> {
     const contractId = STELLAR_CONFIG.factoryContractId
     if (!contractId) return []
@@ -749,8 +747,10 @@ export class StellarService {
 
     for (const event of events) {
       if (event.type === 'token_created' && event.data.creator === creator) {
+        const tokenAddress = event.data.tokenAddress
+        if (!tokenAddress) continue
         try {
-          const info = await this._getTokenInfoByAddress(event.data.tokenAddress)
+          const info = await this._getTokenInfoByAddress(tokenAddress)
           results.push(info)
         } catch {
           // skip tokens that fail to load
@@ -761,9 +761,6 @@ export class StellarService {
     return results
   }
 
-  /**
-   * Fetch and parse contract events for the factory, newest-first.
-   */
   async getContractEvents(
     contractId: string,
     limit = 20,
@@ -774,7 +771,7 @@ export class StellarService {
       pagination: { limit, ...(cursor ? { cursor } : {}) },
     }
 
-    const result = await rpcCall<RpcGetEventsResult>('getEvents', params)
+    const result = await rpcCall<RpcGetEventsResult>('getEvents', params, this.network)
 
     const parsed = await Promise.all(result.events.map(parseRpcEvent))
     const events = parsed
@@ -785,15 +782,38 @@ export class StellarService {
     return { events, cursor: lastEvent?.pagingToken ?? null }
   }
 
-  async getAllTokens(): Promise<TokenInfo[]> {
-    // TODO: replace with real contract/horizon query
-    return []
+  async updateFees(params: { baseFee: string; metadataFee: string }): Promise<string> {
+    try {
+      const contractId = STELLAR_CONFIG.factoryContractId
+      if (!contractId) throw new Error('Factory contract ID is not configured')
+
+      const sourceAddress = walletService.getConnectedAddress()
+      if (!sourceAddress) throw new Error('Wallet not connected')
+
+      const server = getRpcServer(this.network)
+      const contract = new Contract(contractId)
+
+      const txBuilder = await buildTxBuilder(server, sourceAddress, this.network)
+      const tx = txBuilder
+        .addOperation(
+          contract.call(
+            'update_fees',
+            new Address(sourceAddress).toScVal(),
+            nativeToScVal(BigInt(params.baseFee), { type: 'i128' }),
+            nativeToScVal(BigInt(params.metadataFee), { type: 'i128' }),
+          ),
+        )
+        .setTimeout(30)
+        .build()
+
+      return await simulateAndSubmit(server, tx, this.network)
+    } catch (err) {
+      throw parseContractError(err)
+    }
   }
 
-  async getFactoryState(): Promise<FactoryState> {
-    // Implementation for getting factory state (fees) from the contract
-    console.log('Getting factory state')
-    return { baseFee: 70000000, metadataFee: 10000000 } // 7 XLM, 1 XLM in stroops
+  async getAllTokens(): Promise<TokenInfo[]> {
+    return []
   }
 }
 

@@ -1,22 +1,36 @@
-import { useState, useEffect } from 'react'
-import { useTranslation } from 'react-i18next'
-import { Input } from './UI/Input'
+import { useState, useEffect, useCallback } from 'react'
+import { Input, Button, ConfirmModal } from './UI'
 import { useDebounce } from '../hooks/useDebounce'
 import { useTokenBalance } from '../hooks/useTokenBalance'
+import { useTransaction } from '../hooks/useTransaction'
 import { useWalletContext } from '../context/WalletContext'
 import { useTos } from '../context/TosContext'
-import { stellarService } from '../services/stellar'
+import { useStellarContext } from '../context/StellarContext'
+import { useToast } from '../context/ToastContext'
 import type { TokenInfo } from '../types'
 
-export const BurnForm: React.FC = () => {
-  const { t } = useTranslation()
-  const [tokenAddress, setTokenAddress] = useState('')
+const ESTIMATED_FEE_DISPLAY = '0.01 XLM'
+
+interface BurnFormProps {
+  tokenAddress?: string
+  onSuccess?: () => void
+}
+
+export const BurnForm: React.FC<BurnFormProps> = ({
+  tokenAddress: initialAddress = '',
+  onSuccess,
+}) => {
+  const { stellarService } = useStellarContext()
+  const { wallet } = useWalletContext()
+  const { addToast } = useToast()
+  const { requireTos } = useTos()
+  const { hasSufficientBalance, shortfall, isTestnet } = useBalanceCheck(ESTIMATED_FEE_XLM)
+
+  const [tokenAddress, setTokenAddress] = useState(initialAddress)
   const [amount, setAmount] = useState('')
   const [tokenInfo, setTokenInfo] = useState<TokenInfo | null>(null)
   const [pending, setPending] = useState(false)
 
-  const { wallet } = useWalletContext()
-  const { requireTos } = useTos()
   const debouncedAddress = useDebounce(tokenAddress, 300)
 
   const { balance, refresh: refreshBalance } = useTokenBalance(
@@ -24,25 +38,43 @@ export const BurnForm: React.FC = () => {
     wallet.address ?? '',
   )
 
+  const burnBuilder = useCallback(
+    () => stellarService.burnTokens({ tokenAddress, amount }),
+    [stellarService, tokenAddress, amount],
+  )
+
+  const { execute: executeBurn, status: txStatus } = useTransaction(burnBuilder)
+  const isSubmitting = txStatus === 'simulating' || txStatus === 'signing' || txStatus === 'submitting' || txStatus === 'polling'
+
   useEffect(() => {
-    if (!debouncedAddress) return
-    stellarService.getTokenInfo(debouncedAddress).then(setTokenInfo).catch(() => setTokenInfo(null))
-  }, [debouncedAddress])
+    if (!debouncedAddress) { setTokenInfo(null); return }
+    stellarService
+      .getTokenInfo(debouncedAddress)
+      .then(setTokenInfo)
+      .catch(() => setTokenInfo(null))
+  }, [debouncedAddress, stellarService])
 
   const amountExceedsBalance =
     !!amount && !!balance && BigInt(balance) > 0n && BigInt(amount) > BigInt(balance)
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
+    if (!wallet.isConnected) { addToast('Connect your wallet first', 'error'); return }
     if (amountExceedsBalance) return
     requireTos(() => setPending(true))
   }
 
-  const handleConfirm = () => {
+  const handleConfirm = async () => {
     setPending(false)
-    // burn logic placeholder
-    refreshBalance()
-    onSuccess?.()
+    try {
+      await executeBurn()
+      addToast('Tokens burned successfully', 'success')
+      setAmount('')
+      refreshBalance()
+      onSuccess?.()
+    } catch (err) {
+      addToast(err instanceof Error ? err.message : 'Burn failed', 'error')
+    }
   }
 
   return (
@@ -52,8 +84,9 @@ export const BurnForm: React.FC = () => {
           label="Token Address"
           value={tokenAddress}
           onChange={(e) => setTokenAddress(e.target.value)}
-          placeholder="G..."
+          placeholder="C..."
           required
+          disabled={!!initialAddress}
         />
         {tokenInfo && (
           <p className="text-sm text-gray-600 dark:text-gray-400">
@@ -71,32 +104,45 @@ export const BurnForm: React.FC = () => {
           value={amount}
           onChange={(e) => setAmount(e.target.value)}
           placeholder="0"
-          min="0"
+          min="1"
           required
         />
         {amountExceedsBalance && (
-          <p className="text-sm text-red-500">Amount exceeds your balance of {balance}</p>
+          <p className="text-sm text-red-500" role="alert">
+            Amount exceeds your balance of {balance}
+          </p>
         )}
-        <Button type="submit" variant="secondary" disabled={amountExceedsBalance}>
-          Burn
+        <Button
+          type="submit"
+          variant="secondary"
+          loading={isSubmitting}
+          disabled={isSubmitting || amountExceedsBalance || !hasSufficientBalance}
+          className="w-full sm:w-auto"
+        >
+          Burn Tokens
         </Button>
+        {!hasSufficientBalance && (
+          <InsufficientBalanceWarning shortfall={shortfall} isTestnet={isTestnet} />
+        )}
       </form>
 
       <ConfirmModal
         isOpen={pending}
         title="Confirm Burn"
-        description="This will permanently destroy the specified token amount."
+        description="This will permanently destroy the specified token amount. This action cannot be undone."
         details={[
-          { label: 'Token', value: tokenInfo ? `${tokenInfo.name} (${tokenInfo.symbol})` : tokenAddress },
+          {
+            label: 'Token',
+            value: tokenInfo ? `${tokenInfo.name} (${tokenInfo.symbol})` : tokenAddress,
+          },
           { label: 'Amount to Burn', value: amount },
+          { label: 'Your Balance', value: balance },
+          { label: 'Estimated Fee', value: ESTIMATED_FEE_DISPLAY },
         ]}
         onConfirm={handleConfirm}
         onCancel={() => setPending(false)}
         confirmLabel="Burn Tokens"
       />
-      <button type="submit" className="bg-red-500 hover:bg-red-700 text-white font-bold py-2 px-4 rounded">
-        {t('burnForm.burn')}
-      </button>
-    </form>
+    </>
   )
 }

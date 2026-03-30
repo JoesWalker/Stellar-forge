@@ -1,11 +1,28 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import { VitePWA } from 'vite-plugin-pwa'
+import { writeFileSync } from 'fs'
+import { resolve } from 'path'
+
+function healthJsonPlugin() {
+  return {
+    name: 'health-json',
+    closeBundle() {
+      const health = {
+        status: 'ok',
+        version: process.env.VITE_APP_VERSION ?? '0.0.0',
+        timestamp: new Date().toISOString(),
+      }
+      writeFileSync(resolve(__dirname, 'dist/health.json'), JSON.stringify(health, null, 2))
+    },
+  }
+}
 
 // https://vitejs.dev/config/
 export default defineConfig({
   plugins: [
     react(),
+    healthJsonPlugin(),
     VitePWA({
       registerType: 'autoUpdate',
       includeAssets: ['favicon.ico', 'robots.txt', 'icons/*.png'],

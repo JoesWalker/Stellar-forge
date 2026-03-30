@@ -24,17 +24,23 @@ describe('TransactionStatus Component', () => {
     vi.useRealTimers()
   })
 
-  test('renders pending state initially', () => {
+  test('renders pending state initially', async () => {
     ;(stellarService.getTransaction as Mock).mockResolvedValue({ status: 'pending' })
     render(<TransactionStatus txHash="test-hash" />)
     expect(screen.getByText('Transaction pending...')).toBeInTheDocument()
   })
 
-  test('shows success state with explorer link', async () => {
+  test('polls and handles successful transaction', async () => {
     const onSuccess = vi.fn()
-    ;(stellarService.getTransaction as Mock).mockResolvedValue({ status: 'SUCCESS' })
+    ;(stellarService.getTransaction as Mock)
+      .mockResolvedValueOnce({ status: 'pending' })
+      .mockResolvedValueOnce({ status: 'success' })
 
     render(<TransactionStatus txHash="test-hash" onSuccess={onSuccess} />)
+
+    await act(async () => {
+      await Promise.resolve()
+    })
 
     await vi.waitFor(() => {
       expect(screen.getByText('Transaction Successful')).toBeInTheDocument()
@@ -45,17 +51,17 @@ describe('TransactionStatus Component', () => {
     expect(onSuccess).toHaveBeenCalled()
   })
 
-  test('shows failed state with error message and explorer link', async () => {
+  test('polls and handles failed transaction', async () => {
     const onError = vi.fn()
     ;(stellarService.getTransaction as Mock).mockResolvedValue({
-      status: 'FAILED',
-      result_xdr: 'Insufficient funds',
+      status: 'error',
+      error: 'Insufficient funds',
     })
 
     render(<TransactionStatus txHash="test-hash" onError={onError} />)
 
-    await vi.waitFor(() => {
-      expect(screen.getByText('Transaction Failed')).toBeInTheDocument()
+    await act(async () => {
+      await Promise.resolve()
     })
 
     expect(screen.getByText('Insufficient funds')).toBeInTheDocument()
@@ -64,14 +70,14 @@ describe('TransactionStatus Component', () => {
     expect(onError).toHaveBeenCalledWith('Insufficient funds')
   })
 
-  test('uses mainnet explorer URL when on mainnet', async () => {
-    ;(useNetwork as Mock).mockReturnValue({ network: 'mainnet' })
-    ;(stellarService.getTransaction as Mock).mockResolvedValue({ status: 'SUCCESS' })
+  test('handles 60s timeout properly', async () => {
+    const onError = vi.fn()
+    ;(stellarService.getTransaction as Mock).mockResolvedValue({ status: 'pending' })
 
-    render(<TransactionStatus txHash="test-hash" />)
+    render(<TransactionStatus txHash="test-hash" onError={onError} />)
 
-    await vi.waitFor(() => {
-      expect(screen.getByText('Transaction Successful')).toBeInTheDocument()
+    await act(async () => {
+      vi.advanceTimersByTime(60000)
     })
 
     const link = screen.getByRole('link', { name: /view on stellar expert/i })

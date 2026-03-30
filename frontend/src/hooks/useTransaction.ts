@@ -1,61 +1,58 @@
-import { useState, useEffect } from 'react'
-import { stellarService } from '../services/stellar'
+import { useState, useCallback } from 'react'
 
-export type TransactionStatus = 'idle' | 'pending' | 'success' | 'failed'
+export type TransactionStatus =
+  | 'idle'
+  | 'simulating'
+  | 'signing'
+  | 'submitting'
+  | 'polling'
+  | 'success'
+  | 'error'
 
-export interface UseTransactionResult {
+export interface UseTransactionResult<T> {
+  /** Run the transaction. Resolves with the result or throws on error. */
+  execute: () => Promise<T>
+  reset: () => void
   status: TransactionStatus
-  data: Record<string, unknown> | null
-  error: string | null
+  result: T | null
+  error: Error | null
 }
 
-const POLL_INTERVAL_MS = 3_000
-const TIMEOUT_MS = 60_000
-
-export function useTransaction(transactionHash: string | null): UseTransactionResult {
+/**
+ * Centralises transaction lifecycle: simulate → sign → submit → poll.
+ *
+ * @param builder - Async function that performs the full transaction and returns a result.
+ *                  Use the `onStatusChange` callback to report fine-grained status transitions.
+ */
+export function useTransaction<T>(
+  builder: (onStatusChange: (status: TransactionStatus) => void) => Promise<T>,
+): UseTransactionResult<T> {
   const [status, setStatus] = useState<TransactionStatus>('idle')
-  const [data, setData] = useState<Record<string, unknown> | null>(null)
-  const [error, setError] = useState<string | null>(null)
+  const [result, setResult] = useState<T | null>(null)
+  const [error, setError] = useState<Error | null>(null)
 
-  useEffect(() => {
-    if (!transactionHash) return
-
-    setStatus('pending')
-    setData(null)
+  const execute = useCallback(async (): Promise<T> => {
+    setStatus('simulating')
+    setResult(null)
     setError(null)
+    try {
+      const value = await builder(setStatus)
+      setResult(value)
+      setStatus('success')
+      return value
+    } catch (err) {
+      const e = err instanceof Error ? err : new Error(String(err))
+      setError(e)
+      setStatus('error')
+      throw e
+    }
+  }, [builder])
 
-    const startTime = Date.now()
+  const reset = useCallback(() => {
+    setStatus('idle')
+    setResult(null)
+    setError(null)
+  }, [])
 
-    const intervalId = setInterval(async () => {
-      if (Date.now() - startTime >= TIMEOUT_MS) {
-        clearInterval(intervalId)
-        setStatus('failed')
-        setError('Timeout')
-        return
-      }
-
-      try {
-        const result = await stellarService.getTransaction(transactionHash)
-        const txStatus = (result?.status as string | undefined)?.toUpperCase()
-
-        if (txStatus === 'SUCCESS') {
-          clearInterval(intervalId)
-          setData(result)
-          setStatus('success')
-        } else if (txStatus === 'FAILED') {
-          clearInterval(intervalId)
-          setData(result)
-          setError((result?.result_xdr as string) ?? 'Transaction failed')
-          setStatus('failed')
-        }
-        // any other status (e.g. pending / not found) → keep polling
-      } catch {
-        // transient network error — keep polling until timeout
-      }
-    }, POLL_INTERVAL_MS)
-
-    return () => clearInterval(intervalId)
-  }, [transactionHash])
-
-  return { status, data, error }
+  return { execute, reset, status, result, error }
 }

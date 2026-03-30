@@ -50,8 +50,22 @@ describe('useTokens', () => {
   it('fetches all tokens in parallel when no creator given', async () => {
     vi.mocked(stellarService.getContractEvents).mockResolvedValue({
       events: [
-        { id: '1', type: 'token_created', ledger: 1, timestamp: 1000, txHash: 'x', data: { tokenAddress: 'CAAA' } },
-        { id: '2', type: 'token_created', ledger: 2, timestamp: 2000, txHash: 'y', data: { tokenAddress: 'CBBB' } },
+        {
+          id: '1',
+          type: 'token_created',
+          ledger: 1,
+          timestamp: 1000,
+          txHash: 'x',
+          data: { tokenAddress: 'CAAA' },
+        },
+        {
+          id: '2',
+          type: 'token_created',
+          ledger: 2,
+          timestamp: 2000,
+          txHash: 'y',
+          data: { tokenAddress: 'CBBB' },
+        },
       ],
       cursor: null,
     })
@@ -75,16 +89,44 @@ describe('useTokens', () => {
     expect(result.current.tokens).toHaveLength(0)
   })
 
-  it('refetch triggers a fresh fetch', async () => {
+  it('refresh triggers a fresh fetch bypassing cache', async () => {
     vi.mocked(stellarService.getTokensByCreator).mockResolvedValue([TOKEN_A])
 
     const { result } = renderHook(() => useTokens('GABC'))
     await waitFor(() => expect(result.current.isLoading).toBe(false))
 
     vi.mocked(stellarService.getTokensByCreator).mockResolvedValue([TOKEN_A, TOKEN_B])
-    await act(async () => { result.current.refetch() })
+    await act(async () => {
+      result.current.refresh()
+    })
 
     await waitFor(() => expect(result.current.tokens).toHaveLength(2))
     expect(stellarService.getTokensByCreator).toHaveBeenCalledTimes(2)
+  })
+
+  it('paginates tokens correctly', async () => {
+    const manyTokens = Array.from({ length: 15 }, (_, i) => ({
+      name: `Token${i}`,
+      symbol: `TK${i}`,
+      decimals: 7,
+      creator: 'GABC',
+      createdAt: i,
+    }))
+    vi.mocked(stellarService.getTokensByCreator).mockResolvedValue(manyTokens)
+
+    const { result } = renderHook(() => useTokens('GABC'))
+    await waitFor(() => expect(result.current.isLoading).toBe(false))
+
+    // Default pageSize=10, page=1
+    expect(result.current.tokens).toHaveLength(10)
+    expect(result.current.totalCount).toBe(15)
+    expect(result.current.totalPages).toBe(2)
+
+    // Navigate to page 2
+    act(() => {
+      result.current.setPage(2)
+    })
+    expect(result.current.tokens).toHaveLength(5)
+    expect(result.current.page).toBe(2)
   })
 })
