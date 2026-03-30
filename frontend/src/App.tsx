@@ -1,5 +1,5 @@
 import React, { useEffect } from 'react'
-import { ToastContainer, Button, Spinner } from './components/UI'
+import { ToastContainer, WalletButton } from './components/UI'
 import './App.css'
 import { useTranslation } from 'react-i18next'
 import { useDarkMode } from './hooks/useDarkMode'
@@ -117,39 +117,12 @@ function AppContent() {
                   <NetworkSwitcher />
                 </div>
 
-                {wallet.isConnected ? (
-                  <>
-                    <div className="hidden sm:block">
-                      <FundbotButton />
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <div className="hidden md:block text-right">
-                        <div
-                          className="text-sm font-medium text-gray-900 dark:text-gray-100"
-                          title={wallet.address ?? undefined}
-                        >
-                          {wallet.address && truncateAddress(wallet.address)}
-                        </div>
-                      </div>
-                      <Button onClick={handleDisconnect} variant="secondary" size="sm" className="shrink-0">
-                        <span className="hidden sm:inline">{t('wallet.disconnect')}</span>
-                        <span className="sm:hidden">Disconnect</span>
-                      </Button>
-                    </div>
-                  </>
-                ) : (
-                  <Button onClick={handleConnect} disabled={isConnecting} size="sm" className="shrink-0">
-                    {isConnecting ? (
-                      <span className="flex items-center gap-2">
-                        <Spinner size="sm" />
-                        <span className="hidden sm:inline">{t('wallet.connecting')}</span>
-                      </span>
-                    ) : (
-                      <span className="hidden sm:inline">{t('wallet.connect')}</span>
-                    )}
-                    {!isConnecting && <span className="sm:hidden">Connect</span>}
-                  </Button>
+                {wallet.isConnected && (
+                  <div className="hidden sm:block">
+                    <FundbotButton />
+                  </div>
                 )}
+                <WalletButton />
               </div>
               </div>
 
@@ -167,16 +140,6 @@ function AppContent() {
                   <LanguageSwitcher />
                   <NetworkSwitcher />
                   {wallet.isConnected && <FundbotButton />}
-                  {!isInstalled && (
-                    <a
-                      href="https://www.freighter.app/"
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="text-xs text-blue-600 hover:text-blue-800 underline min-h-[44px] flex items-center"
-                    >
-                      {t('wallet.installFreighter')}
-                    </a>
-                  )}
                 </div>
               </div>
             </div>
