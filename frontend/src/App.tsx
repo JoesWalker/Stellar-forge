@@ -37,6 +37,41 @@ const ProtectedRoute: React.FC<{ children: React.ReactElement }> = ({ children }
   return children
 }
 
+interface RouteErrorFallbackProps {
+  routeName: string
+  resetErrorBoundary?: () => void
+}
+
+const RouteErrorFallback: React.FC<RouteErrorFallbackProps> = ({ routeName, resetErrorBoundary }) => (
+  <div className="min-h-[300px] flex items-center justify-center bg-gray-100 dark:bg-slate-900 p-6 rounded-lg">
+    <div className="bg-white dark:bg-slate-800 p-8 rounded-xl shadow-lg text-center max-w-lg w-full">
+      <div className="text-red-500 mb-4">
+        <svg className="h-12 w-12 mx-auto" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+            d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+        </svg>
+      </div>
+      <h2 className="text-2xl font-bold text-gray-900 dark:text-white mb-2">{routeName} encountered an error</h2>
+      <p className="text-gray-600 dark:text-gray-400 mb-6">
+        Something went wrong while loading this page. You can try again without affecting the rest of the app.
+      </p>
+      <button
+        type="button"
+        onClick={resetErrorBoundary}
+        className="bg-blue-600 hover:bg-blue-700 dark:bg-blue-500 dark:hover:bg-blue-400 text-white font-medium py-2 px-6 rounded-lg transition-colors"
+      >
+        Try again
+      </button>
+    </div>
+  </div>
+)
+
+const RouteBoundary: React.FC<{ routeName: string; children: React.ReactNode }> = ({ routeName, children }) => (
+  <ErrorBoundary fallback={<RouteErrorFallback routeName={routeName} />}>
+    {children}
+  </ErrorBoundary>
+)
+
 function AppContent() {
   const { wallet, error } = useWallet()
   const { t } = useTranslation()
@@ -153,18 +188,18 @@ function AppContent() {
                 <Route
                   path="/"
                   element={
-                    <ErrorBoundary>
+                    <RouteBoundary routeName="Home">
                       <Home />
-                    </ErrorBoundary>
+                    </RouteBoundary>
                   }
                 />
                 <Route
                   path="/create"
                   element={
                     <ProtectedRoute>
-                      <ErrorBoundary>
+                      <RouteBoundary routeName="Create Token">
                         <CreateToken />
-                      </ErrorBoundary>
+                      </RouteBoundary>
                     </ProtectedRoute>
                   }
                 />
@@ -172,9 +207,9 @@ function AppContent() {
                   path="/mint"
                   element={
                     <ProtectedRoute>
-                      <ErrorBoundary>
+                      <RouteBoundary routeName="Mint">
                         <MintForm />
-                      </ErrorBoundary>
+                      </RouteBoundary>
                     </ProtectedRoute>
                   }
                 />
@@ -182,9 +217,9 @@ function AppContent() {
                   path="/burn"
                   element={
                     <ProtectedRoute>
-                      <ErrorBoundary>
+                      <RouteBoundary routeName="Burn">
                         <BurnForm />
-                      </ErrorBoundary>
+                      </RouteBoundary>
                     </ProtectedRoute>
                   }
                 />
@@ -192,9 +227,9 @@ function AppContent() {
                   path="/tokens"
                   element={
                     <ProtectedRoute>
-                      <ErrorBoundary>
+                      <RouteBoundary routeName="Tokens">
                         <TokenDashboard />
-                      </ErrorBoundary>
+                      </RouteBoundary>
                     </ProtectedRoute>
                   }
                 />
@@ -202,9 +237,9 @@ function AppContent() {
                   path="/tokens/:address"
                   element={
                     <ProtectedRoute>
-                      <ErrorBoundary>
+                      <RouteBoundary routeName="Token Detail">
                         <TokenDetail />
-                      </ErrorBoundary>
+                      </RouteBoundary>
                     </ProtectedRoute>
                   }
                 />
@@ -212,30 +247,30 @@ function AppContent() {
                   path="/token/:address"
                   element={
                     <ProtectedRoute>
-                      <ErrorBoundary>
+                      <RouteBoundary routeName="Token Detail">
                         <TokenDetail />
-                      </ErrorBoundary>
+                      </RouteBoundary>
                     </ProtectedRoute>
                   }
                 />
                 <Route
                   path="/explorer"
                   element={
-                    <ErrorBoundary>
+                    <RouteBoundary routeName="Explorer">
                       <TokenExplorer />
-                    </ErrorBoundary>
+                    </RouteBoundary>
                   }
                 />
                 <Route
                   path="/metadata"
                   element={
                     <ProtectedRoute>
-                      <ErrorBoundary>
+                      <RouteBoundary routeName="Metadata">
                         <div className="max-w-lg mx-auto">
                           <h2 className="text-xl font-semibold text-gray-900 dark:text-white mb-4">Set Token Metadata</h2>
                           <MetadataForm />
                         </div>
-                      </ErrorBoundary>
+                      </RouteBoundary>
                     </ProtectedRoute>
                   }
                 />
@@ -243,9 +278,9 @@ function AppContent() {
                   path="/admin"
                   element={
                     <ProtectedRoute>
-                      <ErrorBoundary>
+                      <RouteBoundary routeName="Admin Panel">
                         <AdminPanel />
-                      </ErrorBoundary>
+                      </RouteBoundary>
                     </ProtectedRoute>
                   }
                 />
@@ -253,9 +288,9 @@ function AppContent() {
                   path="/dashboard"
                   element={
                     <ProtectedRoute>
-                      <ErrorBoundary>
+                      <RouteBoundary routeName="Dashboard">
                         <TokenDashboard />
-                      </ErrorBoundary>
+                      </RouteBoundary>
                     </ProtectedRoute>
                   }
                 />
@@ -263,9 +298,9 @@ function AppContent() {
                   path="/token/:address"
                   element={
                     <ProtectedRoute>
-                      <ErrorBoundary>
+                      <RouteBoundary routeName="Token Detail">
                         <TokenDetail />
-                      </ErrorBoundary>
+                      </RouteBoundary>
                     </ProtectedRoute>
                   }
                 />
@@ -273,9 +308,9 @@ function AppContent() {
                   path="/manage"
                   element={
                     <ProtectedRoute>
-                      <ErrorBoundary>
+                      <RouteBoundary routeName="Manage">
                         <Manage />
-                      </ErrorBoundary>
+                      </RouteBoundary>
                     </ProtectedRoute>
                   }
                 />
