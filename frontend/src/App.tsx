@@ -284,14 +284,13 @@ function AppContent() {
                   </ProtectedRoute>
                 }
               />
+              {/* Public deep-link route — no wallet required so refresh works */}
               <Route
                 path="/token/:address"
                 element={
-                  <ProtectedRoute>
-                    <RouteBoundary routeName="Token Detail">
-                      <TokenDetail />
-                    </RouteBoundary>
-                  </ProtectedRoute>
+                  <RouteBoundary routeName="Token Detail">
+                    <TokenDetail />
+                  </RouteBoundary>
                 }
               />
               <Route
@@ -333,16 +332,6 @@ function AppContent() {
                   <ProtectedRoute>
                     <RouteBoundary routeName="Dashboard">
                       <TokenDashboard />
-                    </RouteBoundary>
-                  </ProtectedRoute>
-                }
-              />
-              <Route
-                path="/token/:address"
-                element={
-                  <ProtectedRoute>
-                    <RouteBoundary routeName="Token Detail">
-                      <TokenDetail />
                     </RouteBoundary>
                   </ProtectedRoute>
                 }
