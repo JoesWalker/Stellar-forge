@@ -77,6 +77,7 @@ export const TokenExplorer: React.FC = () => {
   useEffect(() => {
     if (totalTokens === 0) return
 
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- entering the loading state is the first step of the page fetch this effect exists to run; see #1002 follow-up
     setLoadingTokens(true)
     const startIndex = (currentPage - 1) * tokensPerPage
     const endIndex = Math.min(startIndex + tokensPerPage, totalTokens)

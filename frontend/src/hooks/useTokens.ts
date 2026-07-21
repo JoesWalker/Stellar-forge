@@ -259,6 +259,7 @@ export function useTokens(creator?: string): UseTokensResult {
   )
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- load sets loading state synchronously as the token fetch starts. See #1002 follow-up
     load(false)
   }, [load])
 
