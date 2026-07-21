@@ -58,6 +58,7 @@ export const TokenHistory: React.FC<TokenHistoryProps> = ({ tokenAddress }) => {
 
   useEffect(() => {
     cursorRef.current = null
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- loadEvents sets loading state synchronously as it starts fetching; see #1002 follow-up
     loadEvents()
   }, [loadEvents])
 
